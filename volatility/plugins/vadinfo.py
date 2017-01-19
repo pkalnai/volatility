@@ -26,6 +26,7 @@
 # "The VAD Tree: A Process-Eye View of Physical Memory," Brendan Dolan-Gavitt
 
 import os.path
+from volatility import renderers
 import volatility.obj as obj
 import volatility.plugins.taskmods as taskmods
 import volatility.debug as debug #pylint: disable-msg=W0611
@@ -370,12 +371,13 @@ class VADWalk(VADInfo):
                         vad.End,
                         vad.Tag)
 
-class VADDump(VADInfo):
+class VADDump(taskmods.DllList):
     """Dumps out the vad sections to a file"""
 
     def __init__(self, config, *args, **kwargs):
-        VADInfo.__init__(self, config, *args, **kwargs)
-        config.remove_option("ADDR")
+        #PK VADInfo.__init__(self, config, *args, **kwargs)
+        taskmods.DllList.__init__(self, config, *args, **kwargs)
+        #P Kconfig.remove_option("ADDR")
         config.add_option('DUMP-DIR', short_option = 'D', default = None,
                           cache_invalidator = False,
                           help = 'Directory in which to dump the VAD files')
@@ -386,7 +388,7 @@ class VADDump(VADInfo):
                           action = 'store', type = 'long', 
                           help = 'Set the maximum size (default is 1GB)') 
 
-    def dump_vad(self, path, vad, address_space):
+    def dump_vad(self, path, dump_file, vad, address_space):
         """
         Dump an MMVAD to a file. 
 
@@ -405,7 +407,7 @@ class VADDump(VADInfo):
         an error message stating why the file could not
         be dumped. 
         """
-
+        path = os.path.join( self._config.DUMP_DIR, dump_file)
         fh = open(path, "wb")
         if fh:
             offset = vad.Start
@@ -418,9 +420,62 @@ class VADDump(VADInfo):
                 fh.write(data)
                 offset += to_read
             fh.close()
-            return path
+            return "OK: {0}".format(dump_file)
         else:
             return "Cannot open {0} for writing".format(path)
+
+    def generator(self, data):
+        for task in data:
+            # Walking the VAD tree can be done in kernel AS, but to 
+            # carve the actual data, we need a valid process AS. 
+            task_space = task.get_process_address_space()
+            if not task_space:
+                outfd.write("Unable to get process AS for {0}\n".format(task.UniqueProcessId))
+                continue
+
+            # as a first step, we try to get the physical offset of the
+            # _EPROCESS object using the process address space
+            offset = task_space.vtop(task.obj_offset)
+            # if this fails, we'll get its physical offset using kernel space
+            if offset == None:
+                offset = task.obj_vm.vtop(task.obj_offset)
+            # if this fails we'll manually set the offset to 0
+            if offset == None:
+                offset = 0
+
+            filter = lambda x : x.Length < self._config.MAX_SIZE
+
+            for vad, _addrspace in task.get_vads(vad_filter = filter, skip_max_commit = True):
+
+                if self._config.BASE and vad.Start != self._config.BASE:
+                    continue
+
+                # Open the file and initialize the data
+
+                vad_start = self.format_value(vad.Start, "[addrpad]")
+                vad_end = self.format_value(vad.End, "[addrpad]")
+                dump_file =  "{0}.{1:x}.{2}-{3}.dmp".format( task.ImageFileName, offset, vad_start, vad_end )
+
+                #PK path = os.path.join( self._config.DUMP_DIR, dump_file)
+                path = self._config.DUMP_DIR
+
+                result = self.dump_vad(path, dump_file, vad, task_space)
+                yield (0,
+                   [int(task.UniqueProcessId),
+                    str(task.ImageFileName),
+                    Address(vad.Start),
+                    Address(vad.End),
+                    str(result)])
+
+
+    def unified_output(self, data):
+
+        return renderers.TreeGrid(
+                          [("PID", int),
+                           ("Process", str),
+                           ("Vad Start", Address),
+                           ("Vad End", Address),
+                           ("Result", str)], self.generator(data))
         
     def render_text(self, outfd, data):
         if self._config.DUMP_DIR == None:
@@ -465,12 +520,12 @@ class VADDump(VADInfo):
 
                 vad_start = self.format_value(vad.Start, "[addrpad]")
                 vad_end = self.format_value(vad.End, "[addrpad]")
+                dump_file =  "{0}.{1:x}.{2}-{3}.dmp".format( task.ImageFileName, offset, vad_start, vad_end )
 
-                path = os.path.join(
-                    self._config.DUMP_DIR, "{0}.{1:x}.{2}-{3}.dmp".format(
-                    task.ImageFileName, offset, vad_start, vad_end))
+                #PK path = os.path.join( self._config.DUMP_DIR, dump_file)
+                path = self._config.DUMP_DIR
 
-                result = self.dump_vad(path, vad, task_space)
+                result = self.dump_vad(path, dump_file, vad, task_space)
 
                 self.table_row(outfd, 
                                task.UniqueProcessId, 
